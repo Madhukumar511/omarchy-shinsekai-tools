@@ -107,6 +107,100 @@ def extract_hue_clustered_palette(image_path):
         'hex': s_hex, 'r': sr, 'g': sg, 'b': sb
     }
 
+def retint_active_terminals():
+    colors_toml = os.path.expanduser("~/.local/state/omarchy/current/theme/colors.toml")
+    if not os.path.exists(colors_toml):
+        colors_toml = os.path.expanduser("~/.config/omarchy/themes/shinsekai/colors.toml")
+        
+    try:
+        res = subprocess.run(["omarchy-theme-osc", colors_toml], capture_output=True, text=True)
+        if res.returncode != 0 or not res.stdout:
+            return
+        foot_osc = res.stdout
+    except Exception:
+        return
+
+    # Background alpha for Foot
+    foot_ini = os.path.expanduser("~/.local/state/omarchy/current/theme/foot.ini")
+    alpha = 0.92
+    if os.path.exists(foot_ini):
+        try:
+            with open(foot_ini) as f:
+                for line in f:
+                    if "alpha" in line and "=" in line:
+                        alpha = float(line.split("=")[1].strip())
+        except Exception:
+            pass
+
+    try:
+        res = subprocess.run(["omarchy-theme-color", "--file", colors_toml, "background"], capture_output=True, text=True)
+        bg = res.stdout.strip()
+        if bg:
+            percent = int(alpha * 100 + 0.5)
+            foot_osc += f"\033]11;[{percent}]{bg}\007"
+    except Exception:
+        pass
+
+    target_ptys = set()
+
+    # 1. Scan children of Foot processes for connected PTS (even if stdout/stderr was redirected to log)
+    try:
+        foot_pids = subprocess.run(["pgrep", "-x", "foot"], capture_output=True, text=True).stdout.strip().split()
+        for fpid in foot_pids:
+            child_pids = []
+            children_file = f"/proc/{fpid}/task/{fpid}/children"
+            if os.path.exists(children_file):
+                try:
+                    with open(children_file) as cf:
+                        child_pids = cf.read().strip().split()
+                except Exception:
+                    pass
+            if not child_pids:
+                try:
+                    res = subprocess.run(["pgrep", "-P", fpid], capture_output=True, text=True)
+                    child_pids = res.stdout.strip().split()
+                except Exception:
+                    pass
+
+            for cpid in child_pids:
+                fd_dir = f"/proc/{cpid}/fd"
+                if os.path.exists(fd_dir):
+                    try:
+                        for fd in os.listdir(fd_dir):
+                            try:
+                                link = os.readlink(os.path.join(fd_dir, fd))
+                                if link.startswith("/dev/pts/"):
+                                    target_ptys.add(link)
+                            except Exception:
+                                pass
+                    except Exception:
+                        pass
+    except Exception:
+        pass
+
+    # 2. Also scan all /dev/pts/* owned by the current user
+    try:
+        pts_dir = "/dev/pts"
+        my_uid = os.getuid()
+        for entry in os.listdir(pts_dir):
+            if entry.isdigit():
+                full_pts = os.path.join(pts_dir, entry)
+                try:
+                    if os.stat(full_pts).st_uid == my_uid:
+                        target_ptys.add(full_pts)
+                except Exception:
+                    pass
+    except Exception:
+        pass
+
+    # Send escape codes directly to every connected terminal
+    for pty in target_ptys:
+        try:
+            with open(pty, "w") as f:
+                f.write(foot_osc)
+        except Exception:
+            pass
+
 def apply_dynamic_theme(image_path=None):
     if not is_shinsekai_active():
         return
@@ -595,6 +689,7 @@ hl.config({{
     subprocess.run("chromium --refresh-platform-policy --no-startup-window >/dev/null 2>&1 &", shell=True)
     subprocess.run("omarchy-theme-set-templates >/dev/null 2>&1", shell=True)
     subprocess.run("omarchy-theme-set-foot >/dev/null 2>&1", shell=True)
+    retint_active_terminals()
     subprocess.run("omarchy-restart-terminal >/dev/null 2>&1", shell=True)
     subprocess.run("hyprctl reload >/dev/null 2>&1", shell=True)
     
